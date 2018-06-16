@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+set -e
+
+# Normalize directory, cd into project root
+SCRIPT_NAME="${BASH_SOURCE[0]}"
+if [ -h "$SCRIPT_NAME" ]; then
+  SCRIPT_NAME="$(readlink "$SCRIPT_NAME")"
+fi
+ROOT_DIR="$(cd $(dirname "$SCRIPT_NAME") && cd .. && pwd)"
+cd "$ROOT_DIR"
+
+# Copy over build files
+rm -rf target/build
+rsync -r --exclude=target . target/build
+
+# Build build image
+docker build --pull -t vapord-build - <<EOT
+FROM openjdk:8-jdk-alpine
+
+# Install dependencies
+RUN \
+  apk add --no-cache bash && \
+  mkdir -p /opt && \
+  wget -q -O - https://sbt-downloads.cdnedge.bluemix.net/releases/v1.1.6/sbt-1.1.6.tgz | \
+  gunzip | \
+  tar -x -C /opt
+ENV PATH="/opt/sbt/bin:\${PATH}"
+
+# Build user
+RUN adduser -D build -u $UID
+USER build:build
+WORKDIR /home/build/vapord
+EOT
+
+# Build the project, producing a fat jar
+
+docker run --rm \
+  -v "$PWD/target/build:/home/build/vapord" vapord-build sbt assembly
+
+
+#docker run -t -i --rm -v
+
+#docker run --rm vapord-build
