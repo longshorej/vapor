@@ -2,7 +2,7 @@
 
 Vapor is an all-in-one metric collection and visualization system. Its main feature is simplicity -- no persistence, a simple protocol, and a limited conceptual model. Metrics are kept in memory and dropped after a configurable period of time.
 
-It's currently very minimal and contains the minimal amount of features necessary to aid in monitoring a UDP-based audio system I'm developing. More to come as needed.
+It's currently very minimal and contains the minimal amount of features necessary to aid in monitoring a UDP-based audio system I'm developing for use at the Longshore household. More to come as needed.
 
 ## Terminology
 
