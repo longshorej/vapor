@@ -4,6 +4,25 @@ Vapor is an all-in-one metric collection and visualization system. Its main feat
 
 It's currently very minimal and contains the minimal amount of features necessary to aid in monitoring a UDP-based audio system I'm developing. More to come as needed.
 
+## Getting Started
+
+Run the daemon:
+
+```bash
+docker run --rm -p 6542:6542 -p 6542:6542/udp appalachian/vapord:latest
+```
+
+Send some data:
+
+```bash
+netcat -u localhost 6542
+g.test.1234
+```
+
+View some data:
+
+http://localhost:6542
+
 ## Terminology
 
 ### Gauge
@@ -25,6 +44,12 @@ case class Event(name: String, rollUpPeriod: Option[Long])
 ## Development
 
 This project uses [sbt](https://www.scala-sbt.org/) for its main UDP server. Client libraries are provided for [Rust](https://www.rust-lang.org/en-US/) and [Akka](https://akka.io/).
+
+## Releases
+
+Clone a fresh copy from upstream and run `sbt release`. It will prompt for the next version number and take care of incrementing versions, creating tags, pushing the commits.
+
+Docker images are created separately using the [dockerfiles](https://github.com/longshorej/dockerfiles) project.
 
 ## Author
 

@@ -1,44 +1,44 @@
 #!/usr/bin/env bash
 
 set -e
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 
-# Normalize directory, cd into project root
-SCRIPT_NAME="${BASH_SOURCE[0]}"
-if [ -h "$SCRIPT_NAME" ]; then
-  SCRIPT_NAME="$(readlink "$SCRIPT_NAME")"
-fi
-ROOT_DIR="$(cd $(dirname "$SCRIPT_NAME") && cd .. && pwd)"
-cd "$ROOT_DIR"
+# This script uses Docker to build a fat jar for vapord.
 
-# Copy over build files
-rm -rf target/build
-rsync -r --exclude=target . target/build
+IMAGE=openjdk:8-jdk-alpine
+SBT_VERSION=1.1.6
 
-# Build build image
-docker build --pull -t vapord-build - <<EOT
-FROM openjdk:8-jdk-alpine
+docker build --pull -t build-vapord - <<EOT
+FROM $IMAGE
 
-# Install dependencies
 RUN \
-  apk add --no-cache bash && \
+  apk add --no-cache bash git && \
   mkdir -p /opt && \
-  wget -q -O - https://sbt-downloads.cdnedge.bluemix.net/releases/v1.1.6/sbt-1.1.6.tgz | \
+  wget -q -O - https://sbt-downloads.cdnedge.bluemix.net/releases/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz | \
   gunzip | \
   tar -x -C /opt
+
 ENV PATH="/opt/sbt/bin:\${PATH}"
 
-# Build user
-RUN adduser -D build -u $UID
+RUN adduser -D build -s $UID
 USER build:build
-WORKDIR /home/build/vapord
+WORKDIR /home/build
+
+CMD ["/bin/bash"]
 EOT
 
-# Build the project, producing a fat jar
+rm -rf "$PWD/target/build"
+rsync -r --exclude=target . target/build
+mkdir -p "$HOME/.cache/appalachian/vapord/build"
+mkdir -p "$PWD/target/build"
 
-docker run --rm \
-  -v "$PWD/target/build:/home/build/vapord" vapord-build sbt assembly
+docker run -i \
+  -v "$HOME/.cache/appalachian/vapord/build:/home/build" \
+  -v "$PWD/target/build:/home/build/vapord" build-vapord << EOT
 
+set -e
+cd vapord
+sbt assembly
+EOT
 
-#docker run -t -i --rm -v
-
-#docker run --rm vapord-build
+find target/build/target/scala-*/vapor-*.jar
