@@ -1,16 +1,34 @@
-name := "vapor"
+import ReleaseTransformations._
 
-scalaVersion in ThisBuild := Versions.scala
+val vapord = Project("vapord", file("."))
+  .settings(
+    name := "vapord",
 
-libraryDependencies ++= Vector(
-  "com.lihaoyi"                %% "scalatags"            % Versions.scalaTags,
-  "com.typesafe.akka"          %% "akka-actor"           % Versions.akka,
-  "com.typesafe.akka"          %% "akka-http-spray-json" % Versions.akkaHttp,
-  "com.typesafe.akka"          %% "akka-stream"          % Versions.akka,
-  "org.webjars.npm"            %  "jquery"               % Versions.jquery,
-  "org.webjars.npm"            %  "morris.js"            % Versions.morrisJs,
-  "org.webjars.npm"            %  "raphael"              % Versions.raphael,
-)
+    scalaVersion in ThisBuild := Versions.scala,
+
+    libraryDependencies ++= Vector(
+      "com.lihaoyi"                %% "scalatags"            % Versions.scalaTags,
+      "com.typesafe.akka"          %% "akka-actor"           % Versions.akka,
+      "com.typesafe.akka"          %% "akka-http-spray-json" % Versions.akkaHttp,
+      "com.typesafe.akka"          %% "akka-stream"          % Versions.akka,
+      "org.webjars.npm"            %  "jquery"               % Versions.jquery,
+      "org.webjars.npm"            %  "morris.js"            % Versions.morrisJs,
+      "org.webjars.npm"            %  "raphael"              % Versions.raphael,
+    ),
+
+    releaseProcess := Seq[ReleaseStep](
+      checkSnapshotDependencies,
+      inquireVersions,
+      runClean,
+      runTest,
+      setReleaseVersion,
+      commitReleaseVersion,
+      tagRelease,
+      setNextVersion,
+      commitNextVersion,
+      pushChanges
+    )
+  )
 
 val Versions = new {
   val akka             = "2.5.11"
