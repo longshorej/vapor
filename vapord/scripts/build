@@ -38,7 +38,7 @@ docker run -i \
 
 set -e
 cd vapord
-sbt assembly
+sbt clean assembly
 EOT
 
-find target/build/target/scala-*/vapor-*.jar
+find target/build/target/scala-*/vapord-*.jar
