@@ -1,6 +1,6 @@
-package com.jasonlongshore.vapor.templates
+package io.appalachian.vapor.vapord.templates
 
-import com.jasonlongshore.vapor._
+import io.appalachian.vapor.vapord._
 import scala.collection.immutable.Seq
 import scalatags.Text.all._
 import scalatags.Text.tags2

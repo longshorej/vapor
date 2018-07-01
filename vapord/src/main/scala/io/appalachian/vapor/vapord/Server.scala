@@ -1,4 +1,4 @@
-package com.jasonlongshore.vapor
+package io.appalachian.vapor.vapord
 
 import akka.Done
 import akka.actor._
@@ -497,7 +497,7 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
 
 object Server {
   def main(args: Array[String]): Unit = {
-    implicit val system: ActorSystem = ActorSystem("vapor")
+    implicit val system: ActorSystem = ActorSystem("vapord")
 
     val settings = Settings(system)
     val metricsCollector = system.actorOf(MetricsCollector.props(settings.metricsBindHost, settings.metricsBindPort), "metricsCollector")

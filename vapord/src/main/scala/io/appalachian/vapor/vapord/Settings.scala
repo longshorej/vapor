@@ -1,14 +1,14 @@
-package com.jasonlongshore.vapor
+package io.appalachian.vapor.vapord
 
 import akka.actor._
 
 final class Settings(system: ExtendedActorSystem) extends Extension {
-  private val vapor = system.settings.config.getConfig("vapor")
+  private val vapord = system.settings.config.getConfig("vapord")
 
-  val metricsBindHost: String = vapor.getString("metrics-bind-host")
-  val metricsBindPort: Int = vapor.getInt("metrics-bind-port")
-  val uiBindHost: String = vapor.getString("ui-bind-host")
-  val uiBindPort: Int = vapor.getInt("ui-bind-port")
+  val metricsBindHost: String = vapord.getString("metrics-bind-host")
+  val metricsBindPort: Int = vapord.getInt("metrics-bind-port")
+  val uiBindHost: String = vapord.getString("ui-bind-host")
+  val uiBindPort: Int = vapord.getInt("ui-bind-port")
 }
 
 object Settings extends ExtensionId[Settings] with ExtensionIdProvider {

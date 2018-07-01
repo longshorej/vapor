@@ -1,4 +1,4 @@
-package com.jasonlongshore.vapor
+package io.appalachian.vapor.vapord
 
 import akka.http.scaladsl.marshalling._
 import akka.http.scaladsl.model._

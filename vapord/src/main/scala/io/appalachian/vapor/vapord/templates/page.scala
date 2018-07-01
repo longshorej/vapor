@@ -1,4 +1,4 @@
-package com.jasonlongshore.vapor.templates
+package io.appalachian.vapor.vapord.templates
 
 import scala.collection.immutable.Seq
 import scalatags.Text.all.{ content => contentAttr, head => headTag, _ }
