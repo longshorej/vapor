@@ -31,8 +31,8 @@ val vapord = Project("vapord", file("."))
   )
 
 val Versions = new {
-  val akka             = "2.5.11"
-  val akkaHttp         = "10.1.2"
+  val akka             = "2.5.13"
+  val akkaHttp         = "10.1.3"
   val argonaut         = "6.2"
   val jquery           = "3.3.1"
   val logback          = "1.2.3"
