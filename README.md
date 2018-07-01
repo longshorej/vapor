@@ -6,10 +6,10 @@ It's currently very minimal and contains the minimal amount of features necessar
 
 ## Getting Started
 
-Run the daemon:
+Run the daemon. You can find a list of versions [on DockerHub](https://hub.docker.com/r/appalachian/vapord/tags/):
 
 ```bash
-docker run --rm -p 6542:6542 -p 6542:6542/udp appalachian/vapord:latest
+docker run --rm -p 6542:6542 -p 6542:6542/udp appalachian/vapord:<version>
 ```
 
 Send some data:
