@@ -47,9 +47,14 @@ This project uses [sbt](https://www.scala-sbt.org/) for its main UDP server. Cli
 
 ## Releases
 
-Clone a fresh copy from upstream and run `sbt release`. It will prompt for the next version number and take care of incrementing versions, creating tags, pushing the commits.
+### vapord
 
-Docker images are created separately using the [dockerfiles](https://github.com/longshorej/dockerfiles) project.
+1. Fresh clone from upstream
+2. `cd vapord`
+3. `sbt release`
+4. `git checkout v<version>`
+5. `docker build -t appalachian/vapord:<version> .`
+6. `docker push appalachian/vapord:<version>`
 
 ## Author
 
