@@ -35,5 +35,5 @@ COPY --from=0 /home/build/target/scala-*/vapord-*.jar /opt/vapord.jar
 WORKDIR /data
 VOLUME /data
 USER app
-ENTRYPOINT ["/usr/bin/dumb-init", "--", "/bin/sh", "-c", "exec /usr/bin/java $JAVA_OPTS -jar /opt/vapord.jar \"$*\""]
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/bin/sh", "-c", "exec /usr/bin/java $JAVA_OPTS -jar /opt/vapord.jar \"$@\"", "--"]
 
