@@ -18,7 +18,7 @@ object page {
       meta(name := "veiwport", contentAttr := "width=device-width, initial-scale=1")
     ),
     body(
-      div(id := "header", div(`class` := "container", "Vapor")),
+      div(id := "header", div(`class` := "container", "vapord")),
       div(id := "content", div(`class` := "container", content)),
       div(id := "footer", div(`class` := "container")),
     )
