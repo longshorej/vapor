@@ -67,6 +67,29 @@ class Oscillator private () extends Actor with Timers {
 }
 
 object MetricsCollector {
+  def window5m(currentTime: Long, data: Iterator[(Long, Long)]): Vector[(Long, Long)] = {
+    case class WindowData(time: Long, values: Vector[Long])
+
+    val oldest = currentTime - (5 * 60)
+
+    data
+      .dropWhile(_._1 < oldest)
+      .foldLeft(Vector.empty[WindowData]) { case (a, (t, v)) =>
+        val time = t / 5 * 5
+
+        a.lastOption match {
+          case Some(WindowData(`time`, data)) =>
+            a.dropRight(1) :+ WindowData(time, data :+ v)
+
+          case _ =>
+            a :+ WindowData(time, Vector(v))
+        }
+      }
+      .map { case WindowData(time, values) =>
+        (time, if (values.length < 1) 0 else values.sum / values.length)
+      }
+  }
+
   def props(host: String, port: Int): Props =
     Props(new MetricsCollector(host, port))
 
@@ -76,7 +99,7 @@ object MetricsCollector {
   case object Stop
 
   object GaugeData {
-    case class Reply(data: Seq[(Long, Long)])
+    case class Reply(data: Vector[(Long, Long)])
   }
 
   case class GaugeData(name: String)
@@ -90,13 +113,13 @@ object MetricsCollector {
   def parseMetric(data: ByteString): Option[Metric] = {
     val isAscii09 = (c: Char) => c >= '0' && c <= '9'
     val parsed = data.utf8String.trim
-    val components = parsed.split('.')
+    val components = parsed.split('/')
 
     if (components.length == 3 && components(2).forall(isAscii09)) {
       val value = components(2).toInt
 
       if (components(0) == "g")
-        Some(Gauge(components(1), components(2).toInt, None))
+        Some(Gauge(components(1), value, None))
       else if (components(0) == "e")
         Some(Event(components(1), if (value > 0) Some(value) else None))
       else
@@ -220,7 +243,13 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
     case GaugeData(name) =>
       val data = metricDatabase.gaugeData(name)
 
-      sender() ! GaugeData.Reply(data)
+      currentTime match {
+        case Some(time) =>
+          sender() ! GaugeData.Reply(window5m(time, data))
+
+        case None =>
+          sender() ! GaugeData.Reply(Vector.empty)
+      }
 
     case Stop =>
       context.stop(oscillator.actorRef)
@@ -281,11 +310,11 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
   private val gauges = mutable.HashMap.empty[String, mutable.TreeMap[Long, Long]]
   private val gaugesLastUpdated = mutable.HashMap.empty[String, Long]
 
-  def gaugeData(name: String): Seq[(Long, Long)] =
+  def gaugeData(name: String): Iterator[(Long, Long)] =
     gauges
       .get(name)
-      .map(_.toVector)
-      .getOrElse(Vector.empty)
+      .map(_.toIterator)
+      .getOrElse(Iterator.empty)
 
   def gaugeNames: Iterable[String] = gauges.keys
 

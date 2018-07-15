@@ -1,10 +1,10 @@
 window.vapor = (function() {
+  const chartsData = {};
   const chartsStore = {};
 
   const refreshChart = (name) => {
     fetch(`api/charts/${name}`).then(response => {
       response.json().then(chart => {
-        console.log(chart);
         renderChart(chart.name, chart.data);
       });
     });
@@ -12,7 +12,10 @@ window.vapor = (function() {
 
   const renderChart = (name, data) => {
     if (chartsStore[name] !== undefined) {
-      chartsStore[name].setData(data);
+      if (chartsData[name] != data) {
+        chartsData[name] = data;
+        chartsStore[name].setData(data);
+      }
     } else {
       const charts = document.getElementById('charts');
 
@@ -42,6 +45,7 @@ window.vapor = (function() {
         element: element.id,
         lineColors: ["#288C00"],
         pointFillColors: ["#CCCCCC"],
+        pointSize: 0,
         pointStrokeColors: ["#CCCCCC"],
         data: data,
         xkey: "when",
@@ -55,19 +59,33 @@ window.vapor = (function() {
       chartsStore[name] = chart;
 
       refreshChart(name);
+
+      setInterval(() => refreshChart(name), 5000);
     }
   };
 
   const init = () => {
-    fetch("api/charts").then(response => {
-      response.json().then(json => {
-        let data = json;
+    const rendered = {};
 
-        for (const chart of data.charts) {
-          renderChart(chart.name, []);
-        }
-      });
-    });
+    setInterval(() =>
+      fetch("api/charts").then(response => {
+        response.json().then(json => {
+          let data = json;
+
+          for (const chart of data.charts) {
+            if (!rendered[chart.name]) {
+              renderChart(chart.name, []);
+              rendered[chart.name] = true;
+            }
+          }
+
+          // @TODO sort DOM so chart order always same
+          // @TODO remove old charts
+        });
+      }),
+
+      1000
+    );
 
     document.getElementById("search").addEventListener("change", e => {
     });
