@@ -16,7 +16,7 @@ Send some data:
 
 ```bash
 netcat -u localhost 6542
-g.test.1234
+g/test/1234
 ```
 
 View some data:
@@ -46,8 +46,6 @@ case class Event(name: String, rollUpPeriod: Option[Long])
 This project uses [sbt](https://www.scala-sbt.org/) for its main UDP server. Client libraries are provided for [Rust](https://www.rust-lang.org/en-US/) and [Akka](https://akka.io/).
 
 ## Releases
-
-### vapord
 
 1. Fresh clone from upstream
 2. `cd vapord`
