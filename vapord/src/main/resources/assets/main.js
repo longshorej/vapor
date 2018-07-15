@@ -36,7 +36,7 @@ window.vapor = (function() {
       const refresh = document.createElement('button');
       refresh.className = 'refresh';
       refresh.innerHTML = escape('R');
-      elementContainer.appendChild(refresh);
+      //elementContainer.appendChild(refresh);
       refresh.addEventListener('click', (e) => {
         refreshChart(name);
       });
