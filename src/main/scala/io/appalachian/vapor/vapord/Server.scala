@@ -95,7 +95,7 @@ object MetricsCollector {
 
   sealed trait Metric
   case class Gauge(name: String, value: Long, when: Option[Long]) extends Metric
-  case class Event(name: String, rollUpPeriod: Option[Long]) extends Metric
+  case class Event(name: String, value: Long, rollUpPeriod: Int) extends Metric
   case object Stop
 
   object GaugeData {
@@ -112,18 +112,15 @@ object MetricsCollector {
 
   def parseMetric(data: ByteString): Option[Metric] = {
     val isAscii09 = (c: Char) => c >= '0' && c <= '9'
+    val isNumber = (value: String) => value.nonEmpty && value.forall(isAscii09)
+
     val parsed = data.utf8String.trim
     val components = parsed.split('/')
 
-    if (components.length == 3 && components(2).forall(isAscii09)) {
-      val value = components(2).toInt
-
-      if (components(0) == "g")
-        Some(Gauge(components(1), value, None))
-      else if (components(0) == "e")
-        Some(Event(components(1), if (value > 0) Some(value) else None))
-      else
-        None
+    if (components.length == 3 && components(0) == 'g' && isNumber(components(2))) {
+      Some(Gauge(components(1), components(2).toLong, None))
+    } else if (components.length == 4 && components(0) == 'e' && components.length == 4 && isNumber(components(2)) && isNumber(components(3))) {
+      Some(Event(components(1), components(2).toLong, components(3).toInt))
     } else {
       None
     }
@@ -140,8 +137,8 @@ object MetricsCollector {
  *
  * Example metrics:
  *
- * "g.my-metric.12345" yields Gauge("my-metric", 12345)
- * "e.my-event.60" yields Event("my-event", Some(60))
+ * "g.my-metric/12345" yields Gauge("my-metric", 12345)
+ * "e.my-event/5/60" yields Event("my-event", 5, 60)
  */
 class MetricsCollector private (host: String, port: Int) extends Actor with ActorLogging with Stash {
   import MetricsCollector._
@@ -221,8 +218,8 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
     case Udp.Received(data, remote) =>
       currentTime.foreach { time =>
         parseMetric(data) match {
-          case Some(Event(name, maybePeriod)) =>
-            metricDatabase.ingestEvent(time, name, maybePeriod.getOrElse(defaultPeriod))
+          case Some(Event(name, value, period)) =>
+            metricDatabase.ingestEvent(time, name, value, period)
 
           case Some(Gauge(name, value, when)) =>
             metricDatabase.ingestGauge(time, name, value)
@@ -318,9 +315,9 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
 
   def gaugeNames: Iterable[String] = gauges.keys
 
-  def ingestEvent(currentTime: Long, name: String, rollUpPeriod: Long): Unit = {
+  def ingestEvent(currentTime: Long, name: String, value: Long, rollUpPeriod: Long): Unit = {
     val entry = events.getOrElseUpdate(rollUpPeriod, mutable.HashMap.empty)
-    entry.update(name, entry.getOrElse(name, 0L) + 1L)
+    entry.update(name, entry.getOrElse(name, 0L) + value)
   }
 
   /**
