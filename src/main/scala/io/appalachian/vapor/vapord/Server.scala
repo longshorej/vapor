@@ -117,9 +117,9 @@ object MetricsCollector {
     val parsed = data.utf8String.trim
     val components = parsed.split('/')
 
-    if (components.length == 3 && components(0) == 'g' && isNumber(components(2))) {
+    if (components.length == 3 && components(0) == "g" && isNumber(components(2))) {
       Some(Gauge(components(1), components(2).toLong, None))
-    } else if (components.length == 4 && components(0) == 'e' && components.length == 4 && isNumber(components(2)) && isNumber(components(3))) {
+    } else if (components.length == 4 && components(0) == "e" && components.length == 4 && isNumber(components(2)) && isNumber(components(3))) {
       Some(Event(components(1), components(2).toLong, components(3).toInt))
     } else {
       None
