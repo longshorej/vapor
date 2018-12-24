@@ -1,6 +1,6 @@
 import ReleaseTransformations._
 
-val vapord = Project("vapord", file("."))
+lazy val vapord = project.in(file("."))
   .settings(
     name := "vapord",
 
@@ -30,9 +30,9 @@ val vapord = Project("vapord", file("."))
     )
   )
 
-val Versions = new {
-  val akka             = "2.5.13"
-  val akkaHttp         = "10.1.3"
+lazy val Versions = new {
+  val akka             = "2.5.17"
+  val akkaHttp         = "10.1.6"
   val argonaut         = "6.2"
   val jquery           = "3.3.1"
   val logback          = "1.2.3"

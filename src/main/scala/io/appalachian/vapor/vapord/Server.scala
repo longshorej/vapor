@@ -1,24 +1,26 @@
 package io.appalachian.vapor.vapord
 
-import akka.Done
+import akka.{Done, NotUsed}
 import akka.actor._
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.coding.Gzip
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
 import akka.http.scaladsl.model._
+import akka.http.scaladsl.model.sse.ServerSentEvent
 import akka.http.scaladsl.server.Route
 import akka.http.scaladsl.server.Directives._
-import akka.io.{ IO, Udp }
-import akka.pattern.{ ask, pipe }
-import akka.stream.{ ActorMaterializer, Materializer}
+import akka.io.{IO, Udp}
+import akka.pattern.{ask, pipe}
+import akka.stream.{ActorMaterializer, Materializer}
 import akka.stream.scaladsl._
-import akka.util.{ ByteString, Timeout }
+import akka.util.{ByteString, Timeout}
 import java.net.InetSocketAddress
 import java.nio.file.Paths
 import java.time._
+
 import scala.collection.immutable.Seq
 import scala.collection.mutable
-import scala.concurrent.{ ExecutionContext, Future }
+import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
 import scala.io.StdIn
 import spray.json._
@@ -41,52 +43,50 @@ object Oscillator {
 class Oscillator private () extends Actor with Timers {
   import Oscillator._
 
+  private var last: Long = Instant.now().getEpochSecond
+
   override def preStart(): Unit = {
     timers.startPeriodicTimer("tick", Tick, 100.milliseconds)
   }
 
-  override def receive: Receive = advance(Instant.now().getEpochSecond)
-
-  private def advance(last: Long): Receive = {
+  override def receive: Receive = {
     case Tick =>
       val current = Instant.now().getEpochSecond
 
       // With NTP and other clock adjustments, time can go
       // backwards so we guard against that.
       if (current > last) {
-        // If we had a long GC pause, this will emit any ticks we
-        // may have missed.
-        ((last + 1) to current)
-          .foreach { value =>
-            context.parent ! Time(value)
-          }
-
-        context.become(advance(current))
+        var value = last + 1
+        while (value <= current) {
+          context.parent ! Time(value)
+          last = value
+          value += 1
+        }
       }
   }
 }
 
 object MetricsCollector {
-  def window5m(currentTime: Long, data: Iterator[(Long, Long)]): Vector[(Long, Long)] = {
-    case class WindowData(time: Long, values: Vector[Long])
+  def window5m(currentTime: Long, data: Iterator[GaugeEntry]): Vector[GaugeEntry] = {
+    case class WindowData(time: Long, sum: Long, size: Long)
 
     val oldest = currentTime - (5 * 60)
 
     data
-      .dropWhile(_._1 < oldest)
-      .foldLeft(Vector.empty[WindowData]) { case (a, (t, v)) =>
+      .dropWhile(_.when < oldest)
+      .foldLeft(Vector.empty[WindowData]) { case (a, GaugeEntry(t, v)) =>
         val time = t / 5 * 5
 
         a.lastOption match {
-          case Some(WindowData(`time`, data)) =>
-            a.dropRight(1) :+ WindowData(time, data :+ v)
+          case Some(WindowData(`time`, sum, size)) =>
+            a.dropRight(1) :+ WindowData(time, sum + v, size + 1)
 
           case _ =>
-            a :+ WindowData(time, Vector(v))
+            a :+ WindowData(time, v, 1)
         }
       }
-      .map { case WindowData(time, values) =>
-        (time, if (values.length < 1) 0 else values.sum / values.length)
+      .map { case WindowData(time, sum, size) =>
+        GaugeEntry(time, if (size == 0) 0 else sum / size)
       }
   }
 
@@ -98,8 +98,12 @@ object MetricsCollector {
   case class Event(name: String, value: Long, rollUpPeriod: Int) extends Metric
   case object Stop
 
+  object GaugeEntries {
+    case class Reply(source: Source[GaugeEntry, NotUsed])
+  }
+
   object GaugeData {
-    case class Reply(data: Vector[(Long, Long)])
+    case class Reply(data: Vector[GaugeEntry])
   }
 
   case class GaugeData(name: String)
@@ -178,7 +182,7 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
   /**
    * Remove old metrics this often (seconds)
    */
-  private val removeOldMetricsInterval = 60L * 60L
+  private val removeOldMetricsInterval = 300L
 
   private implicit val executionContext: ExecutionContext = context.dispatcher
   private implicit val system: ActorSystem = context.system
@@ -237,6 +241,9 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
 
       sender() ! ListGauges.Reply(metricDatabase.gaugeNames.toVector)
 
+    case GaugeEntries =>
+      sender() ! GaugeEntries.Reply(metricDatabase.gaugeStream)
+
     case GaugeData(name) =>
       val data = metricDatabase.gaugeData(name)
 
@@ -271,7 +278,9 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
       }
 
       if (value % removeOldMetricsInterval == 0) {
-        metricDatabase.removeOldMetrics(value)
+        val removed = metricDatabase.removeOldMetrics(value)
+
+        log.info("Holding [{}] gauge entries after removing [{}]", metricDatabase.numberOfGaugeEntries, removed.gaugeEntriesRemoved)
       }
 
     case other => throw UnknownMessage(other)
@@ -284,6 +293,8 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
   }
 
 }
+
+case class GaugeEntry(when: Long, value: Long)
 
 object MetricDatabase {
   case class Removed(gaugesRemoved: Int, gaugeEntriesRemoved: Int)
@@ -300,20 +311,31 @@ object MetricDatabase {
  * This class is not thread safe so proper care must be
  * taken if using in a concurrent environment.
  */
-class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long) {
+class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)(implicit mat: Materializer) {
   import MetricDatabase._
 
   private val events = mutable.HashMap.empty[Long, mutable.HashMap[String, Long]]
   private val gauges = mutable.HashMap.empty[String, mutable.TreeMap[Long, Long]]
   private val gaugesLastUpdated = mutable.HashMap.empty[String, Long]
 
-  def gaugeData(name: String): Iterator[(Long, Long)] =
+  private val (gaugeEntrySink, gaugeEntrySource) =
+    MergeHub.source[GaugeEntry]
+      .toMat(BroadcastHub.sink)(Keep.both)
+      .run()
+
+  gaugeEntrySource.runWith(Sink.ignore)
+
+  def gaugeData(name: String): Iterator[GaugeEntry] =
     gauges
       .get(name)
       .map(_.toIterator)
       .getOrElse(Iterator.empty)
+      .map(GaugeEntry.tupled)
 
   def gaugeNames: Iterable[String] = gauges.keys
+
+  def gaugeStream: Source[GaugeEntry, NotUsed] =
+    gaugeEntrySource
 
   def ingestEvent(currentTime: Long, name: String, value: Long, rollUpPeriod: Long): Unit = {
     val entry = events.getOrElseUpdate(rollUpPeriod, mutable.HashMap.empty)
@@ -328,15 +350,23 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
   def ingestGauge(currentTime: Long, name: String, value: Long): Unit = {
     val collection = gauges.getOrElseUpdate(name, mutable.TreeMap.empty)
 
-    collection.get(currentTime) match {
+    val gaugeEntry = collection.get(currentTime) match {
       case Some(existing) =>
+        val newValue = (existing + value) / 2
         collection.update(currentTime, (existing + value) / 2)
+        GaugeEntry(currentTime, newValue)
       case None =>
         collection.update(currentTime, value)
+        GaugeEntry(currentTime, value)
     }
+
+    Source.single(gaugeEntry).runWith(gaugeEntrySink)
 
     gaugesLastUpdated.update(name, currentTime)
   }
+
+  def numberOfGaugeEntries: Long =
+    gauges.foldLeft(0L)(_ + _._2.size)
 
   def removeOldMetrics(currentTime: Long): Removed = {
     var gaugeEntriesRemoved = 0
@@ -361,19 +391,23 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
 
     val oldestAllowed = currentTime - maxGaugeLife
 
-    gauges
-      .foldLeft(List.empty[String]) { case (rm, (name, entries)) =>
-        val initialSize = entries.size
-        entries.dropWhile(_._1 < oldestAllowed)
-        entries.dropWhile(_ => entries.size > maxGaugeEntries)
-        gaugeEntriesRemoved += initialSize - entries.size
+    gauges.foreach { case (name, entries) =>
+      val initialSize = entries.size
 
-        if (entries.isEmpty)
-          name :: rm
-        else
-          rm
+      while (entries.nonEmpty && entries.head._1 < oldestAllowed) {
+        entries.remove(entries.head._1)
       }
-      .foreach(removeGauge)
+
+      while (entries.nonEmpty && entries.size > maxGaugeEntries) {
+        entries.remove(entries.head._1)
+      }
+
+      gaugeEntriesRemoved += initialSize - entries.size
+
+      if (entries.isEmpty) {
+        removeGauge(name)
+      }
+    }
 
     if (gauges.size > maxGauges) {
       // this is a bit performance intensive -- have to convert to list
@@ -433,6 +467,8 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
   private implicit val timeout: Timeout = Timeout(10.seconds)
 
   private object UIRoute extends JsonSupport {
+    import akka.http.scaladsl.marshalling.sse.EventStreamMarshalling._
+
     val route = concat(
       (get & pathEndOrSingleSlash) {
         complete(
@@ -448,7 +484,7 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
 
             complete(
               data.map(d =>
-                ChartData(name, d.data.map { case (k, v) => ChartEntry(k * 1000, v) })
+                ChartData(name, d.data.map { case GaugeEntry(k, v) => ChartEntry(k * 1000, v) })
               )
             )
           },
@@ -459,6 +495,20 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
             complete(
               data.map(d =>
                 ChartListing(d.names.map(Chart.apply))
+              )
+            )
+          },
+          (get & path("gauge-entries")) {
+            val data = (metricsCollector ? MetricsCollector.GaugeEntries)
+              .mapTo[MetricsCollector.GaugeEntries.Reply]
+
+            complete(
+              data.map(
+                _
+                  .source
+                  .map(gaugeEntry => ChartEntry(gaugeEntry.when * 1000, gaugeEntry.value).toJson.compactPrint)
+                  .map(data => ServerSentEvent(data, "GaugeEntry"))
+                  .keepAlive(1.second, () => ServerSentEvent.heartbeat)
               )
             )
           }
@@ -524,6 +574,7 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
 object Server {
   def main(args: Array[String]): Unit = {
     implicit val system: ActorSystem = ActorSystem("vapord")
+
 
     val settings = Settings(system)
     val metricsCollector = system.actorOf(MetricsCollector.props(settings.metricsBindHost, settings.metricsBindPort), "metricsCollector")
