@@ -68,25 +68,25 @@ class Oscillator private () extends Actor with Timers {
 
 object MetricsCollector {
   def window5m(currentTime: Long, data: Iterator[GaugeEntry]): Vector[GaugeEntry] = {
-    case class WindowData(time: Long, sum: Long, size: Long)
+    case class WindowData(name: String, time: Long, sum: Long, size: Long)
 
     val oldest = currentTime - (5 * 60)
 
     data
       .dropWhile(_.when < oldest)
-      .foldLeft(Vector.empty[WindowData]) { case (a, GaugeEntry(t, v)) =>
+      .foldLeft(Vector.empty[WindowData]) { case (a, GaugeEntry(n, t, v)) =>
         val time = t / 5 * 5
 
         a.lastOption match {
-          case Some(WindowData(`time`, sum, size)) =>
-            a.dropRight(1) :+ WindowData(time, sum + v, size + 1)
+          case Some(WindowData(_, `time`, sum, size)) =>
+            a.dropRight(1) :+ WindowData(n, time, sum + v, size + 1)
 
           case _ =>
-            a :+ WindowData(time, v, 1)
+            a :+ WindowData(n, time, v, 1)
         }
       }
-      .map { case WindowData(time, sum, size) =>
-        GaugeEntry(time, if (size == 0) 0 else sum / size)
+      .map { case WindowData(n, time, sum, size) =>
+        GaugeEntry(n, time, if (size == 0) 0 else sum / size)
       }
   }
 
@@ -294,7 +294,7 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
 
 }
 
-case class GaugeEntry(when: Long, value: Long)
+case class GaugeEntry(name: String, when: Long, value: Long)
 
 object MetricDatabase {
   case class Removed(gaugesRemoved: Int, gaugeEntriesRemoved: Int)
@@ -330,7 +330,7 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
       .get(name)
       .map(_.toIterator)
       .getOrElse(Iterator.empty)
-      .map(GaugeEntry.tupled)
+      .map { case (when, value) => GaugeEntry(name, when, value) }
 
   def gaugeNames: Iterable[String] = gauges.keys
 
@@ -354,10 +354,10 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
       case Some(existing) =>
         val newValue = (existing + value) / 2
         collection.update(currentTime, (existing + value) / 2)
-        GaugeEntry(currentTime, newValue)
+        GaugeEntry(name, currentTime, newValue)
       case None =>
         collection.update(currentTime, value)
-        GaugeEntry(currentTime, value)
+        GaugeEntry(name, currentTime, value)
     }
 
     Source.single(gaugeEntry).runWith(gaugeEntrySink)
@@ -446,6 +446,9 @@ trait JsonSupport extends SprayJsonSupport with DefaultJsonProtocol {
 
   implicit val chartListingFormat: RootJsonFormat[ChartListing] =
     jsonFormat1(ChartListing)
+
+  implicit val gaugeEntryFormat: RootJsonFormat[GaugeEntry] =
+    jsonFormat3(GaugeEntry)
 }
 
 object UserInterface {
@@ -484,7 +487,7 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
 
             complete(
               data.map(d =>
-                ChartData(name, d.data.map { case GaugeEntry(k, v) => ChartEntry(k * 1000, v) })
+                ChartData(name, d.data.map { case GaugeEntry(n, k, v) => ChartEntry(k * 1000, v) })
               )
             )
           },
@@ -506,8 +509,7 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
               data.map(
                 _
                   .source
-                  .map(gaugeEntry => ChartEntry(gaugeEntry.when * 1000, gaugeEntry.value).toJson.compactPrint)
-                  .map(data => ServerSentEvent(data, "GaugeEntry"))
+                  .map(entry => ServerSentEvent(entry.toJson.compactPrint, "GaugeEntry"))
                   .keepAlive(1.second, () => ServerSentEvent.heartbeat)
               )
             )

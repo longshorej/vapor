@@ -14,6 +14,8 @@ lazy val vapord = project.in(file("."))
       "org.webjars.npm"            %  "jquery"               % Versions.jquery,
       "org.webjars.npm"            %  "morris.js"            % Versions.morrisJs,
       "org.webjars.npm"            %  "raphael"              % Versions.raphael,
+      "org.webjars.npm"            %  "react"                % Versions.react,
+      "org.webjars.npm"            %  "recharts"             % Versions.recharts
     ),
 
     releaseProcess := Seq[ReleaseStep](
@@ -30,17 +32,27 @@ lazy val vapord = project.in(file("."))
     )
   )
 
+// @FIXME see https://github.com/webjars/webjars/issues/1789
+dependencyOverrides ++= Seq(
+  "org.webjars.npm" % "js-tokens" % Versions.jsTokens,
+  "org.webjars.npm" % "scheduler" % Versions.scheduler
+)
+
 lazy val Versions = new {
-  val akka             = "2.5.17"
+  val akka             = "2.5.19"
   val akkaHttp         = "10.1.6"
   val argonaut         = "6.2"
   val jquery           = "3.3.1"
+  val jsTokens         = "3.0.2"
   val logback          = "1.2.3"
   val morrisJs         = "0.5.0"
   val raphael          = "2.2.7"
-  val scala            = "2.12.6"
+  val react            = "16.6.3"
+  val recharts         = "1.4.2"
+  val scala            = "2.12.8"
   val scalaLogging     = "3.9.0"
   val scalaTags        = "0.6.7"
+  val scheduler        = "0.12.0"
 }
 
 resolvers += Resolver.typesafeRepo("releases")

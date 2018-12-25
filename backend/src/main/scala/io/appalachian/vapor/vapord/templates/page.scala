@@ -11,9 +11,7 @@ object page {
       head,
       link(rel := "stylesheet", `type` := "text/css", href := "/assets/main.css"),
       link(rel := "stylesheet", `type` := "text/css", href := "/webjars/morris.js/0.5.0/morris.css"),
-      script(src := "/webjars/jquery/3.3.1/dist/jquery.js"),
-      script(src := "/webjars/raphael/2.2.7/raphael.min.js"),
-      script(src := "/webjars/morris.js/0.5.0/morris.min.js"),
+      script(src := "/webjars/react/16.6.3/cjs/react.production.min.js"),
       script(src := "/assets/main.js"),
       meta(name := "veiwport", contentAttr := "width=device-width, initial-scale=1")
     ),
