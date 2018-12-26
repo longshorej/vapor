@@ -3,9 +3,7 @@ package io.appalachian.vapor.vapord
 import akka.{Done, NotUsed}
 import akka.actor._
 import akka.http.scaladsl.Http
-import akka.http.scaladsl.coding.Gzip
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
-import akka.http.scaladsl.model._
 import akka.http.scaladsl.model.sse.ServerSentEvent
 import akka.http.scaladsl.server.Route
 import akka.http.scaladsl.server.Directives._
@@ -15,14 +13,11 @@ import akka.stream.{ActorMaterializer, Materializer}
 import akka.stream.scaladsl._
 import akka.util.{ByteString, Timeout}
 import java.net.InetSocketAddress
-import java.nio.file.Paths
 import java.time._
-
 import scala.collection.immutable.Seq
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
-import scala.io.StdIn
 import spray.json._
 
 object UnknownMessage {
@@ -68,25 +63,25 @@ class Oscillator private () extends Actor with Timers {
 
 object MetricsCollector {
   def window5m(currentTime: Long, data: Iterator[GaugeEntry]): Vector[GaugeEntry] = {
-    case class WindowData(time: Long, sum: Long, size: Long)
+    case class WindowData(name: String, time: Long, sum: Long, size: Long)
 
     val oldest = currentTime - (5 * 60)
 
     data
       .dropWhile(_.when < oldest)
-      .foldLeft(Vector.empty[WindowData]) { case (a, GaugeEntry(t, v)) =>
+      .foldLeft(Vector.empty[WindowData]) { case (a, GaugeEntry(n, t, v)) =>
         val time = t / 5 * 5
 
         a.lastOption match {
-          case Some(WindowData(`time`, sum, size)) =>
-            a.dropRight(1) :+ WindowData(time, sum + v, size + 1)
+          case Some(WindowData(_, `time`, sum, size)) =>
+            a.dropRight(1) :+ WindowData(n, time, sum + v, size + 1)
 
           case _ =>
-            a :+ WindowData(time, v, 1)
+            a :+ WindowData(n, time, v, 1)
         }
       }
-      .map { case WindowData(time, sum, size) =>
-        GaugeEntry(time, if (size == 0) 0 else sum / size)
+      .map { case WindowData(n, time, sum, size) =>
+        GaugeEntry(n, time, if (size == 0) 0 else sum / size)
       }
   }
 
@@ -294,10 +289,12 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
 
 }
 
-case class GaugeEntry(when: Long, value: Long)
+case class GaugeEntry(name: String, when: Long, value: Long)
 
 object MetricDatabase {
   case class Removed(gaugesRemoved: Int, gaugeEntriesRemoved: Int)
+
+  val TimeLimitMs: Int = 300000
 }
 
 /**
@@ -314,6 +311,8 @@ object MetricDatabase {
 class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)(implicit mat: Materializer) {
   import MetricDatabase._
 
+
+
   private val events = mutable.HashMap.empty[Long, mutable.HashMap[String, Long]]
   private val gauges = mutable.HashMap.empty[String, mutable.TreeMap[Long, Long]]
   private val gaugesLastUpdated = mutable.HashMap.empty[String, Long]
@@ -323,19 +322,27 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
       .toMat(BroadcastHub.sink)(Keep.both)
       .run()
 
-  gaugeEntrySource.runWith(Sink.ignore)
+  @volatile
+  private var latest = Vector.empty[GaugeEntry]
+
+  gaugeEntrySource.runWith(Sink.foreach { gaugeEntry =>
+    val now = System.currentTimeMillis()
+    latest = (latest :+ gaugeEntry).dropWhile(_.when < (now - TimeLimitMs) / 1000)
+  })
 
   def gaugeData(name: String): Iterator[GaugeEntry] =
     gauges
       .get(name)
       .map(_.toIterator)
       .getOrElse(Iterator.empty)
-      .map(GaugeEntry.tupled)
+      .map { case (when, value) => GaugeEntry(name, when, value) }
 
   def gaugeNames: Iterable[String] = gauges.keys
 
   def gaugeStream: Source[GaugeEntry, NotUsed] =
-    gaugeEntrySource
+    Source
+      .fromIterator(() => latest.iterator)
+      .merge(gaugeEntrySource)
 
   def ingestEvent(currentTime: Long, name: String, value: Long, rollUpPeriod: Long): Unit = {
     val entry = events.getOrElseUpdate(rollUpPeriod, mutable.HashMap.empty)
@@ -354,10 +361,10 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
       case Some(existing) =>
         val newValue = (existing + value) / 2
         collection.update(currentTime, (existing + value) / 2)
-        GaugeEntry(currentTime, newValue)
+        GaugeEntry(name, currentTime, newValue)
       case None =>
         collection.update(currentTime, value)
-        GaugeEntry(currentTime, value)
+        GaugeEntry(name, currentTime, value)
     }
 
     Source.single(gaugeEntry).runWith(gaugeEntrySink)
@@ -446,6 +453,9 @@ trait JsonSupport extends SprayJsonSupport with DefaultJsonProtocol {
 
   implicit val chartListingFormat: RootJsonFormat[ChartListing] =
     jsonFormat1(ChartListing)
+
+  implicit val gaugeEntryFormat: RootJsonFormat[GaugeEntry] =
+    jsonFormat3(GaugeEntry)
 }
 
 object UserInterface {
@@ -459,7 +469,6 @@ object UserInterface {
 
 class UserInterface private (metricsCollector: ActorRef, host: String, port: Int) extends Actor with ActorLogging with Stash {
   import UserInterface._
-  import templates.Implicits._
 
   private implicit val executionContext: ExecutionContext = context.dispatcher
   private implicit val system: ActorSystem = context.system
@@ -470,12 +479,6 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
     import akka.http.scaladsl.marshalling.sse.EventStreamMarshalling._
 
     val route = concat(
-      (get & pathEndOrSingleSlash) {
-        complete(
-          templates.listing()
-        )
-      },
-
       pathPrefix("api")(Route.seal(
         concat(
           (get & path("charts" / Segment)) { name =>
@@ -484,7 +487,7 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
 
             complete(
               data.map(d =>
-                ChartData(name, d.data.map { case GaugeEntry(k, v) => ChartEntry(k * 1000, v) })
+                ChartData(name, d.data.map { case GaugeEntry(n, k, v) => ChartEntry(k * 1000, v) })
               )
             )
           },
@@ -506,26 +509,15 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
               data.map(
                 _
                   .source
-                  .map(gaugeEntry => ChartEntry(gaugeEntry.when * 1000, gaugeEntry.value).toJson.compactPrint)
-                  .map(data => ServerSentEvent(data, "GaugeEntry"))
+                  .map(entry => ServerSentEvent(entry.toJson.compactPrint, "GaugeEntry"))
                   .keepAlive(1.second, () => ServerSentEvent.heartbeat)
               )
             )
           }
         )
       )),
-
-      pathPrefix("assets") {
-        encodeResponseWith(Gzip) {
-          getFromResourceDirectory("assets")
-        }
-      },
-
-      pathPrefix("webjars") {
-        encodeResponseWith(Gzip) {
-          getFromResourceDirectory("META-INF/resources/webjars")
-        }
-      }
+      pathEndOrSingleSlash(getFromResource("assets/index.html")),
+      getFromResourceDirectory("assets")
     )
   }
 

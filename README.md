@@ -58,12 +58,17 @@ This project uses [sbt](https://www.scala-sbt.org/) for its daemon.
 
 ## Releases
 
+This is currently harder than it needs to be.
+
 1. Fresh clone from upstream
-2. `cd vapord`
+2. `cd vapor/backend`
 3. `sbt release`
 4. `git checkout v<version>`
-5. `docker build -t appalachian/vapord:<version> .`
-6. `docker push appalachian/vapord:<version>`
+5. `cd ../frontend; npm run build`
+6. `cd ../backend; sbt assembly`
+7. `cd ..`
+7. `docker build -t appalachian/vapord:<version> .`
+8. `docker push appalachian/vapord:<version>`
 
 ## Author
 
