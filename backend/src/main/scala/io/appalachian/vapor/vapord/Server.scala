@@ -339,10 +339,35 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
 
   def gaugeNames: Iterable[String] = gauges.keys
 
+  /**
+    * Emits `GaugeEntry`s as they occur. Entries
+    * are grouped within a 1 second window and
+    * averaged out (mean).
+    */
   def gaugeStream: Source[GaugeEntry, NotUsed] =
     Source
       .fromIterator(() => latest.iterator)
       .merge(gaugeEntrySource)
+      .groupedWithin(Int.MaxValue, 1.second)
+      .mapConcat { gauges =>
+        // Group each gauge entry along with others
+        // of the same name/time
+        val groups = gauges
+          .groupBy(e => (e.name, e.when))
+          .toVector
+          .sortBy(_._1)
+          .map(_._2)
+
+        // Flatten them so that there's only one
+        // gauge entry emitted (by name) per second
+        groups.flatMap { gauges =>
+          gauges.headOption.map { head =>
+            val summed = gauges.foldLeft(0L)(_ + _.value)
+            val averaged = summed / gauges.length
+            GaugeEntry(head.name, head.when, averaged)
+          }
+        }
+      }
 
   def ingestEvent(currentTime: Long, name: String, value: Long, rollUpPeriod: Long): Unit = {
     val entry = events.getOrElseUpdate(rollUpPeriod, mutable.HashMap.empty)
