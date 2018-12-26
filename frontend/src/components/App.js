@@ -30,6 +30,8 @@ export default class extends React.Component {
       timestamp: new Date().getTime()
     };
 
+
+    this.handleClean = this.handleClean.bind(this);
     this.handleGaugeEntry = this.handleGaugeEntry.bind(this);
     this.handlePeriodClick = this.handlePeriodClick.bind(this);
     this.handlePeriodDropdownClick = this.handlePeriodDropdownClick.bind(this);
@@ -41,6 +43,7 @@ export default class extends React.Component {
 
     this.eventSource.addEventListener('GaugeEntry', this.handleGaugeEntry);
 
+    this.cleanInterval = window.setInterval(this.handleClean, 3000);
     this.tickInterval = window.setInterval(this.handleTick, 1000 / 15);
   }
 
@@ -48,7 +51,27 @@ export default class extends React.Component {
     this.eventSource.removeAllListeners();
     this.eventSource.close();
 
+    window.clearInterval(this.cleanInterval);
     window.clearInterval(this.tickInterval);
+  }
+
+  handleClean() {
+    // @FIXME this needs to be in sync with backend somehow (durations)
+    this.setState(state => {
+      const oldestAllowed = ((1000 * 60 * 5) + (1000 * 10)); // 5 minutes, 10 seconds
+
+      for (const section of Object.keys(state.data)) {
+        for (const gaugeName of Object.keys(state.data[section].entries)) {
+          var numberToRemove = 0;
+          while (
+            numberToRemove < state.data[section].entries[gaugeName].length &&
+            state.data[section].entries[gaugeName][numberToRemove].when < oldestAllowed) {
+            numberToRemove++;
+          }
+          state.data[section].entries[gaugeName].splice(0, numberToRemove);
+        }
+      }
+    });
   }
 
   handleTick() {
@@ -76,6 +99,8 @@ export default class extends React.Component {
               if (state.data[name].entries[parsed.name] === undefined) {
                 state.data[name].entries[parsed.name] = [];
               }
+
+
 
               state.data[name].entries[parsed.name].push({
                 when: parsed.when * 1000,
