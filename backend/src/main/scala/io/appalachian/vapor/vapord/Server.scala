@@ -294,6 +294,7 @@ case class GaugeEntry(name: String, when: Long, value: Long)
 object MetricDatabase {
   case class Removed(gaugesRemoved: Int, gaugeEntriesRemoved: Int)
 
+  val MaxGaugeNames: Int = 65536
   val TimeLimitMs: Int = 300000
 }
 
@@ -340,34 +341,48 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
   def gaugeNames: Iterable[String] = gauges.keys
 
   /**
-    * Emits `GaugeEntry`s as they occur. Entries
-    * are grouped within a 1 second window and
-    * averaged out (mean).
+   * Emits `GaugeEntry`s as they occur. Entries are grouped
+   * within a 1 second window and averaged out (mean).
+   *
+   * This differs slightly from groupedWithin given that
+   * we wish to emit events from `latest` immediately when
+   * the when value changes.
     */
-  def gaugeStream: Source[GaugeEntry, NotUsed] =
+  def gaugeStream: Source[GaugeEntry, NotUsed] = {
+    sealed trait Element
+    case class Wrapper(value: GaugeEntry) extends Element
+    case object Tick extends Element
+
+    case class Accum(name: String, when: Long, sum: Long, count: Long)
+
     Source
       .fromIterator(() => latest.iterator)
-      .merge(gaugeEntrySource)
-      .groupedWithin(Int.MaxValue, 1.second)
-      .mapConcat { gauges =>
-        // Group each gauge entry along with others
-        // of the same name/time
-        val groups = gauges
-          .groupBy(e => (e.name, e.when))
-          .toVector
-          .sortBy(_._1)
-          .map(_._2)
+      .concat(gaugeEntrySource)
+      .groupBy(MaxGaugeNames, _.name)
+      .map[Element](Wrapper.apply)
+      .merge(Source.tick[Element](0.seconds, 1.second, Tick))
+      .scan[(Option[Accum], Option[GaugeEntry])](None -> None) {
+        case ((Some(Accum(name, when, sum, count)), _), Tick) =>
+          None -> Some(GaugeEntry(name, when, sum / count))
 
-        // Flatten them so that there's only one
-        // gauge entry emitted (by name) per second
-        groups.flatMap { gauges =>
-          gauges.headOption.map { head =>
-            val summed = gauges.foldLeft(0L)(_ + _.value)
-            val averaged = summed / gauges.length
-            GaugeEntry(head.name, head.when, averaged)
-          }
-        }
+        case ((None, _), Tick) =>
+          None -> None
+
+        case ((Some(Accum(name, when, sum, count)), _), Wrapper(next)) if next.when == when =>
+          Some(Accum(name, when, sum + next.value, count + 1)) -> None
+
+        case ((Some(Accum(name, when, sum, count)), _), Wrapper(next)) =>
+          Some(Accum(next.name, next.when, next.value, 1L)) -> Some(GaugeEntry(name, when, sum / count))
+
+        case ((None, _), Wrapper(next)) =>
+          Some(Accum(next.name, next.when, next.value, 1L)) -> None
       }
+      .mergeSubstreams
+      .collect {
+        case (_, Some(gaugeEntry)) =>
+          gaugeEntry
+      }
+  }
 
   def ingestEvent(currentTime: Long, name: String, value: Long, rollUpPeriod: Long): Unit = {
     val entry = events.getOrElseUpdate(rollUpPeriod, mutable.HashMap.empty)
