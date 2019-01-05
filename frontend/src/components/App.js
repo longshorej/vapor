@@ -81,6 +81,8 @@ export default class extends React.Component {
     this.gaugeEntriesEventSource = null;
     this.namesEventSource = null;
 
+    this._isMounted = false;
+
     this.handleClean = this.handleClean.bind(this);
     this.handleGaugeEntry = this.handleGaugeEntry.bind(this);
     this.handleGaugeNameAdded = this.handleGaugeNameAdded.bind(this);
@@ -88,6 +90,7 @@ export default class extends React.Component {
     this.handleHashchange = this.handleHashchange.bind(this);
     this.handlePeriodClick = this.handlePeriodClick.bind(this);
     this.handlePeriodDropdownClick = this.handlePeriodDropdownClick.bind(this);
+    this.handleRefresh = this.handleRefresh.bind(this);
     this.handleTick = this.handleTick.bind(this);
     this.setupGaugeEntries = this.setupGaugeEntries.bind(this);
     this.setupNames = this.setupNames.bind(this);
@@ -174,16 +177,22 @@ export default class extends React.Component {
   }
 
   componentDidMount() {
+    this._isMounted = true;
+
     this.setupNames();
 
     window.addEventListener('hashchange', this.handleHashchange, false);
     this.cleanInterval = window.setInterval(this.handleClean, 10000);
-    this.tickInterval = window.setInterval(this.handleTick, 1000 / 15);
+
+    window.requestAnimationFrame(this.handleTick);
+    //this.tickInterval = window.setInterval(this.handleTick, 1000 / 15);
 
     this.handleHashchange();
   }
 
   componentWillUnmount() {
+    this._isMounted = false;
+
     if (this.gaugeEntriesEventSource !== null) {
       this.gaugeEntriesEventSource.close();
       this.gaugeEntriesEventSource = null;
@@ -196,7 +205,7 @@ export default class extends React.Component {
 
     window.removeEventListener('hashchange', this.handleHashchange, false);
     window.clearInterval(this.cleanInterval);
-    window.clearInterval(this.tickInterval);
+    //window.clearInterval(this.tickInterval);
   }
 
   handleClean() {
@@ -220,6 +229,11 @@ export default class extends React.Component {
         }
       }
     });
+  }
+
+  handleRefresh(e) {
+    e.preventDefault();
+    this.setupGaugeEntries();
   }
 
   handleTick() {
@@ -272,6 +286,10 @@ export default class extends React.Component {
       gaugeEntries.length = 0;
 
       return state;
+    }, () => {
+      if (this._isMounted) {
+        window.requestAnimationFrame(this.handleTick);
+      }
     });
   }
 
@@ -380,11 +398,11 @@ export default class extends React.Component {
 
     // @FIXME a bit crude
     if (this.state.period === '1h') {
-      domain = [this.state.timestamp - (1000 * 60 * 60), this.state.timestamp];
+      domain = [moment(this.state.timestamp).subtract({ 'hours': 1 }).valueOf(), this.state.timestamp];
     } else if (this.state.period === '1d') {
       domain = [this.state.timestamp - (1000 * 60 * 60 * 24), this.state.timestamp];
     } else if (this.state.period === '2w') {
-      domain = [this.state.timestamp - (1000 * 60 * 24 * 14), this.state.timestamp];
+      domain = [this.state.timestamp - (1000 * 60 * 60 * 24 * 14), this.state.timestamp];
     }
 
     // @TODO implement others on the backend
@@ -484,7 +502,7 @@ export default class extends React.Component {
                                     domain = {domain}
                                     name = 'Time'
                                     tickFormatter = {(unixTime) => moment(parseInt(unixTime, 10)).format('YYYY-MM-DD h:mm:ss a')}
-                                    tickCount={2}
+                                    ticks = {domain}
                                     tickLine={false}
                                     axisLine={false}
                                     stroke="#FFFFFF"
@@ -516,6 +534,8 @@ export default class extends React.Component {
                                   <a href={`#${n}/1d`} className={classNames("btn", { "btn-secondary": this.state.period !== '1d', "btn-primary": this.state.period === '1d' })}>1D</a>
                                   <a href={`#${n}/2w`} className={classNames("btn", { "btn-secondary": this.state.period !== '2w', "btn-primary": this.state.period === '2w' })}>2W</a>
                                 </div>
+
+                                {this.state.period !== 'live' && <a href={`#${n}/${this.state.period}`} onClick={this.handleRefresh} className="btn btn-info" style={{ position: 'absolute', right: '1rem' }}>↻</a>}
                               </div>
                             </div>
                           </div>;

@@ -30,6 +30,7 @@ class UnknownMessage(message: Any) extends RuntimeException(s"Unknown: $message"
 
 object Oscillator {
   private val granularity = 250.milliseconds
+  private val pauseLimitSeconds = 3
 
   case class Ref(actorRef: ActorRef)
   case object Tick
@@ -57,8 +58,16 @@ class Oscillator private () extends Actor with Timers {
 
       // With NTP and other clock adjustments, time can go
       // backwards so we guard against that.
+      //
+      // Also, if we were suspended, then we'll bound the period
+      // to reduce CPU consumption
       if (current > last) {
-        var value = last + 1
+        var value =
+          if (current - last < pauseLimitSeconds)
+            last + 1
+          else
+            current
+
         while (value <= current) {
           context.parent ! Time(Instant.ofEpochMilli(value))
           last = value
