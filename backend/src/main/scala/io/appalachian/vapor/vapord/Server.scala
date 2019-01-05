@@ -9,11 +9,13 @@ import akka.http.scaladsl.server.Route
 import akka.http.scaladsl.server.Directives._
 import akka.io.{IO, Udp}
 import akka.pattern.{ask, pipe}
-import akka.stream.{ActorMaterializer, Materializer}
+import akka.stream.{ActorMaterializer, Materializer, OverflowStrategy}
 import akka.stream.scaladsl._
 import akka.util.{ByteString, Timeout}
 import java.net.InetSocketAddress
 import java.time._
+import java.time.temporal.ChronoUnit
+
 import scala.collection.immutable.Seq
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
@@ -27,9 +29,11 @@ object UnknownMessage {
 class UnknownMessage(message: Any) extends RuntimeException(s"Unknown: $message")
 
 object Oscillator {
+  private val granularity = 250.milliseconds
+
   case class Ref(actorRef: ActorRef)
   case object Tick
-  case class Time(value: Long)
+  case class Time(value: Instant)
 
   def spawn(name: String)(implicit context: ActorContext): Oscillator.Ref =
     Ref(context.actorOf(Props[Oscillator], name))
@@ -38,39 +42,80 @@ object Oscillator {
 class Oscillator private () extends Actor with Timers {
   import Oscillator._
 
-  private var last: Long = Instant.now().getEpochSecond
+  private var last: Long = Instant.now().toEpochMilli
 
   override def preStart(): Unit = {
-    timers.startPeriodicTimer("tick", Tick, 100.milliseconds)
+    timers.startPeriodicTimer("tick", Tick, granularity)
   }
+
+  private val granularityMs = granularity.toMillis
 
   override def receive: Receive = {
     case Tick =>
-      val current = Instant.now().getEpochSecond
+      // @FIXME some marshalling back and forth here, probably doesn't matter much..
+      val current = Instant.now().toEpochMilli * granularityMs / granularityMs
 
       // With NTP and other clock adjustments, time can go
       // backwards so we guard against that.
       if (current > last) {
         var value = last + 1
         while (value <= current) {
-          context.parent ! Time(value)
+          context.parent ! Time(Instant.ofEpochMilli(value))
           last = value
-          value += 1
+          value += granularityMs
         }
       }
   }
 }
 
 object MetricsCollector {
-  def window5m(currentTime: Long, data: Iterator[GaugeEntry]): Vector[GaugeEntry] = {
+  private val gaugeListLimit = 30
+
+  /**
+    * If an event is specified with a period of 0,
+    * use this period instead (seconds)
+    */
+  private val defaultPeriod = 60.seconds
+
+  /**
+    * The number of validate periods, i.e. events can be
+    * rolled up over any interval (by second) upto this
+    * many seconds.
+    */
+  private val numberOfPeriods = 600.seconds
+
+  /**
+    * The maximum number of gauges to hold
+    */
+  private val maxGauges = 16384
+
+  /**
+    * The maximum number of entries for a given
+    * gauge
+    */
+  private val maxGaugeEntries = 16384
+
+  /**
+    * The maximum gauge lifetime, currently ~2 weeks
+    * but will deviate depending upon DST, timezone, etc.
+    */
+  private val maxGaugeLife = 14.days
+
+  /**
+    * Remove old metrics this often
+    */
+  private val removeOldMetricsInterval = 300.seconds
+
+  def window(currentTime: Instant, data: Iterator[GaugeEntry], windowLength: WindowLength): Vector[GaugeEntry] = {
     case class WindowData(name: String, time: Long, sum: Long, size: Long)
 
-    val oldest = currentTime - (5 * 60)
+    val oldest = currentTime.toEpochMilli - windowLength.windowLength.toMillis
+    val divide = windowLength.averagePeriod.toMillis
 
     data
       .dropWhile(_.when < oldest)
       .foldLeft(Vector.empty[WindowData]) { case (a, GaugeEntry(n, t, v)) =>
-        val time = t / 5 * 5
+        val time = t / divide * divide
 
         a.lastOption match {
           case Some(WindowData(_, `time`, sum, size)) =>
@@ -89,8 +134,8 @@ object MetricsCollector {
     Props(new MetricsCollector(host, port))
 
   sealed trait Metric
-  case class Gauge(name: String, value: Long, when: Option[Long]) extends Metric
-  case class Event(name: String, value: Long, rollUpPeriod: Int) extends Metric
+  case class Gauge(name: String, value: Long, when: Option[Instant]) extends Metric
+  case class Event(name: String, value: Long, rollUpPeriod: FiniteDuration) extends Metric
   case object Stop
 
   object GaugeEntries {
@@ -101,13 +146,11 @@ object MetricsCollector {
     case class Reply(data: Vector[GaugeEntry])
   }
 
-  case class GaugeData(name: String)
-
-  object ListGauges {
-    case class Reply(names: Seq[String])
+  object GaugeNames {
+    case class Reply(source: Source[GaugeNamesChanged, NotUsed])
   }
 
-  case class ListGauges(startingWith: String)
+  case class GaugeData(name: String, windowLength: WindowLength)
 
   def parseMetric(data: ByteString): Option[Metric] = {
     val isAscii09 = (c: Char) => c >= '0' && c <= '9'
@@ -119,7 +162,12 @@ object MetricsCollector {
     if (components.length == 3 && components(0) == "g" && isNumber(components(2))) {
       Some(Gauge(components(1), components(2).toLong, None))
     } else if (components.length == 4 && components(0) == "e" && components.length == 4 && isNumber(components(2)) && isNumber(components(3))) {
-      Some(Event(components(1), components(2).toLong, components(3).toInt))
+      val providedPeriod = components(3).toLong.millis
+
+      if (providedPeriod.toMillis <= numberOfPeriods.toMillis)
+        Some(Event(components(1), components(2).toLong, components(3).toLong.millis))
+      else
+        None
     } else {
       None
     }
@@ -142,43 +190,6 @@ object MetricsCollector {
 class MetricsCollector private (host: String, port: Int) extends Actor with ActorLogging with Stash {
   import MetricsCollector._
 
-  private val gaugeListLimit = 30
-
-  /**
-   * If an event is specified with a period of 0,
-   * use this period instead (seconds)
-   */
-  private val defaultPeriod = 60L
-
-  /**
-   * The number of validate periods, i.e. events can be
-   * rolled up over any interval (by second) upto this
-   * many seconds.
-   */
-  private val numberOfPeriods = 600
-
-  /**
-   * The maximum number of gauges to hold
-   */
-  private val maxGauges = 16384
-
-  /**
-   * The maximum number of entries for a given
-   * gauge
-   */
-  private val maxGaugeEntries = 16384
-
-  /**
-   * The maximum gauge lifetime in seconds, currently ~2 weeks
-   * but will deviate depending upon DST, timezone, etc.
-   */
-  private val maxGaugeLife = 86400L * 14L
-
-  /**
-   * Remove old metrics this often (seconds)
-   */
-  private val removeOldMetricsInterval = 300L
-
   private implicit val executionContext: ExecutionContext = context.dispatcher
   private implicit val system: ActorSystem = context.system
   private implicit val materializer: Materializer = ActorMaterializer()
@@ -186,7 +197,7 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
 
   private val oscillator = Oscillator.spawn("ocillator")
 
-  private var currentTime = Option.empty[Long]
+  private var currentTime = Option.empty[Instant]
   private var maybeSocket = Option.empty[ActorRef]
 
   private val metricDatabase = new MetricDatabase(maxGauges, maxGaugeEntries, maxGaugeLife)
@@ -227,24 +238,18 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
         }
       }
 
-    case ListGauges(startingWith) =>
-      val names = metricDatabase
-        .gaugeNames
-        .filter(_.startsWith(startingWith))
-        .take(gaugeListLimit)
-        .toVector
-
-      sender() ! ListGauges.Reply(metricDatabase.gaugeNames.toVector)
-
     case GaugeEntries =>
-      sender() ! GaugeEntries.Reply(metricDatabase.gaugeStream)
+      sender() ! GaugeEntries.Reply(metricDatabase.dataStream)
 
-    case GaugeData(name) =>
+    case GaugeNames =>
+      sender() ! GaugeNames.Reply(metricDatabase.nameStream)
+
+    case GaugeData(name, windowLength) =>
       val data = metricDatabase.gaugeData(name)
 
       currentTime match {
         case Some(time) =>
-          sender() ! GaugeData.Reply(window5m(time, data))
+          sender() ! GaugeData.Reply(window(time, data, windowLength))
 
         case None =>
           sender() ! GaugeData.Reply(Vector.empty)
@@ -264,15 +269,17 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
       context.become(stopping)
 
     case Oscillator.Time(value) =>
+      val valueMs = value.toEpochMilli
+
       currentTime = Some(value)
 
-      for (i <- 1 to numberOfPeriods) {
-        if (value % i == 0) {
-          metricDatabase.rollUp(value, i)
+      for (i <- 1L to numberOfPeriods.toMillis) {
+        if (valueMs % i == 0) {
+          metricDatabase.rollUp(value, i.millis)
         }
       }
 
-      if (value % removeOldMetricsInterval == 0) {
+      if (valueMs % removeOldMetricsInterval.toMillis == 0) {
         val removed = metricDatabase.removeOldMetrics(value)
 
         log.info("Holding [{}] gauge entries after removing [{}]", metricDatabase.numberOfGaugeEntries, removed.gaugeEntriesRemoved)
@@ -289,11 +296,46 @@ class MetricsCollector private (host: String, port: Int) extends Actor with Acto
 
 }
 
+sealed trait GaugeNamesChanged
+
+case class GaugeNameAdded(name: String) extends GaugeNamesChanged
+
+case class GaugeNameRemoved(name: String) extends GaugeNamesChanged
+
 case class GaugeEntry(name: String, when: Long, value: Long)
 
+sealed trait WindowLength {
+  def averagePeriod: FiniteDuration
+  def windowLength: FiniteDuration
+}
+
+object WindowLength {
+  case object P1H extends WindowLength {
+    // 360
+    val averagePeriod: FiniteDuration = 10.seconds
+    val windowLength: FiniteDuration = 1.hour
+  }
+
+  case object P1D extends WindowLength {
+    // 360
+    val averagePeriod: FiniteDuration = 4.minutes
+    val windowLength: FiniteDuration = 1.day
+  }
+
+  case object P2W extends WindowLength {
+    // 336
+    val averagePeriod: FiniteDuration = 1.hour
+    val windowLength: FiniteDuration = 14.days
+  }
+}
+
 object MetricDatabase {
+
+
   case class Removed(gaugesRemoved: Int, gaugeEntriesRemoved: Int)
 
+  val GaugeBufferSize: Int = 2048
+  val GaugeNameInterval: FiniteDuration = 1.second
   val MaxGaugeNames: Int = 65536
   val TimeLimitMs: Int = 300000
 }
@@ -309,7 +351,7 @@ object MetricDatabase {
  * This class is not thread safe so proper care must be
  * taken if using in a concurrent environment.
  */
-class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)(implicit mat: Materializer) {
+class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: FiniteDuration)(implicit mat: Materializer) {
   import MetricDatabase._
 
 
@@ -326,6 +368,9 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
   @volatile
   private var latest = Vector.empty[GaugeEntry]
 
+  @volatile
+  private var allNames = Set.empty[String]
+
   gaugeEntrySource.runWith(Sink.foreach { gaugeEntry =>
     val now = System.currentTimeMillis()
     latest = (latest :+ gaugeEntry).dropWhile(_.when < (now - TimeLimitMs) / 1000)
@@ -338,8 +383,6 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
       .getOrElse(Iterator.empty)
       .map { case (when, value) => GaugeEntry(name, when, value) }
 
-  def gaugeNames: Iterable[String] = gauges.keys
-
   /**
    * Emits `GaugeEntry`s as they occur. Entries are grouped
    * within a 1 second window and averaged out (mean).
@@ -348,7 +391,7 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
    * we wish to emit events from `latest` immediately when
    * the when value changes.
     */
-  def gaugeStream: Source[GaugeEntry, NotUsed] = {
+  def dataStream: Source[GaugeEntry, NotUsed] = {
     sealed trait Element
     case class Wrapper(value: GaugeEntry) extends Element
     case object Tick extends Element
@@ -382,10 +425,23 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
         case (_, Some(gaugeEntry)) =>
           gaugeEntry
       }
+      .buffer(GaugeBufferSize, OverflowStrategy.dropHead)
   }
 
-  def ingestEvent(currentTime: Long, name: String, value: Long, rollUpPeriod: Long): Unit = {
-    val entry = events.getOrElseUpdate(rollUpPeriod, mutable.HashMap.empty)
+  def nameStream: Source[GaugeNamesChanged, NotUsed] =
+    Source
+      .tick(0.seconds, GaugeNameInterval, NotUsed)
+      .map(_ => allNames)
+      .scan((Set.empty[String], Set.empty[String], Set.empty[String])) { case ((last, _, _), next) =>
+        (next, next.diff(last), last.diff(next))
+      }
+      .mapConcat { case (_, added, removed) =>
+        added.map(GaugeNameAdded.apply) ++ removed.map(GaugeNameRemoved.apply)
+      }
+      .mapMaterializedValue(_ => NotUsed)
+
+  def ingestEvent(currentTime: Instant, name: String, value: Long, rollUpPeriod: FiniteDuration): Unit = {
+    val entry = events.getOrElseUpdate(rollUpPeriod.toMillis, mutable.HashMap.empty)
     entry.update(name, entry.getOrElse(name, 0L) + value)
   }
 
@@ -394,33 +450,37 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
    * the given gauge, the mean average of the currently stored value and
    * the provided value is stored.
    */
-  def ingestGauge(currentTime: Long, name: String, value: Long): Unit = {
+  def ingestGauge(currentTime: Instant, name: String, value: Long): Unit = {
+    val currentTimeMillis = currentTime.toEpochMilli
     val collection = gauges.getOrElseUpdate(name, mutable.TreeMap.empty)
 
-    val gaugeEntry = collection.get(currentTime) match {
+    val gaugeEntry = collection.get(currentTimeMillis) match {
       case Some(existing) =>
         val newValue = (existing + value) / 2
-        collection.update(currentTime, (existing + value) / 2)
-        GaugeEntry(name, currentTime, newValue)
+        collection.update(currentTimeMillis, (existing + value) / 2)
+        GaugeEntry(name, currentTimeMillis, newValue)
       case None =>
-        collection.update(currentTime, value)
-        GaugeEntry(name, currentTime, value)
+        collection.update(currentTimeMillis, value)
+        GaugeEntry(name, currentTimeMillis, value)
     }
 
     Source.single(gaugeEntry).runWith(gaugeEntrySink)
 
-    gaugesLastUpdated.update(name, currentTime)
+    gaugesLastUpdated.update(name, currentTime.toEpochMilli)
+
+    allNames = allNames + name
   }
 
   def numberOfGaugeEntries: Long =
     gauges.foldLeft(0L)(_ + _._2.size)
 
-  def removeOldMetrics(currentTime: Long): Removed = {
+  def removeOldMetrics(currentTime: Instant): Removed = {
     var gaugeEntriesRemoved = 0
     var gaugesRemoved = 0
 
     def removeGauge(name: String): Unit = {
       gauges.remove(name)
+      allNames = allNames - name
       gaugesLastUpdated.remove(name)
       gaugesRemoved += 1
     }
@@ -436,7 +496,7 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
         removeGauges(oldest.tail)
       }
 
-    val oldestAllowed = currentTime - maxGaugeLife
+    val oldestAllowed = currentTime.minus(maxGaugeLife.toMillis, ChronoUnit.MILLIS).toEpochMilli
 
     gauges.foreach { case (name, entries) =>
       val initialSize = entries.size
@@ -465,13 +525,13 @@ class MetricDatabase(maxGauges: Long, maxGaugeEntries: Long, maxGaugeLife: Long)
     Removed(gaugesRemoved, gaugeEntriesRemoved)
   }
 
-  def rollUp(currentTime: Long, period: Long): Unit = {
-    events.get(period).foreach { entries =>
+  def rollUp(currentTime: Instant, period: FiniteDuration): Unit = {
+    events.get(period.toMillis).foreach { entries =>
       entries.foreach { case (name, value) =>
         ingestGauge(currentTime, name, value)
       }
 
-      events.remove(period)
+      events.remove(period.toMillis)
     }
   }
 }
@@ -496,6 +556,12 @@ trait JsonSupport extends SprayJsonSupport with DefaultJsonProtocol {
 
   implicit val gaugeEntryFormat: RootJsonFormat[GaugeEntry] =
     jsonFormat3(GaugeEntry)
+
+  implicit val gaugeNameAddedFormat: RootJsonFormat[GaugeNameAdded] =
+    jsonFormat1(GaugeNameAdded)
+
+  implicit val gaugeNameRemovedFormat: RootJsonFormat[GaugeNameRemoved] =
+    jsonFormat1(GaugeNameRemoved)
 }
 
 object UserInterface {
@@ -521,35 +587,61 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
     val route = concat(
       pathPrefix("api")(Route.seal(
         concat(
-          (get & path("charts" / Segment)) { name =>
-            val data = (metricsCollector ? MetricsCollector.GaugeData(name))
+          (get & pathPrefix("gauge-entries" / Segment)) { name =>
+
+            def windowedData(windowLength: WindowLength) = {
+              val data = (metricsCollector ? MetricsCollector.GaugeData(name, windowLength))
                 .mapTo[MetricsCollector.GaugeData.Reply]
 
-            complete(
-              data.map(d =>
-                ChartData(name, d.data.map { case GaugeEntry(n, k, v) => ChartEntry(k * 1000, v) })
+              complete(
+                Source
+                  .fromFutureSource(data.map(entries => Source(entries.data)))
+                  .map(gaugeEntry => ServerSentEvent(gaugeEntry.toJson.compactPrint, "GaugeEntry"))
               )
-            )
-          },
-          (get & path("charts")) {
-            val data = (metricsCollector ? MetricsCollector.ListGauges(""))
-                .mapTo[MetricsCollector.ListGauges.Reply]
 
-            complete(
-              data.map(d =>
-                ChartListing(d.names.map(Chart.apply))
-              )
+            }
+
+            concat(
+              path("1h") {
+                windowedData(WindowLength.P1H)
+              },
+              path("1d") {
+                windowedData(WindowLength.P1D)
+              },
+              path("2w") {
+                windowedData(WindowLength.P2W)
+              },
+              pathEnd {
+                val data = (metricsCollector ? MetricsCollector.GaugeEntries)
+                  .mapTo[MetricsCollector.GaugeEntries.Reply]
+
+                complete(
+                  data.map(
+                    _
+                      .source
+                      .filter(_.name == name)
+                      .map(gaugeEntry => ServerSentEvent(gaugeEntry.toJson.compactPrint, "GaugeEntry"))
+                      .keepAlive(10.seconds, () => ServerSentEvent.heartbeat)
+                  )
+                )
+              }
             )
+
           },
-          (get & path("gauge-entries")) {
-            val data = (metricsCollector ? MetricsCollector.GaugeEntries)
-              .mapTo[MetricsCollector.GaugeEntries.Reply]
+          (get & path("gauge-names")) {
+            val data = (metricsCollector ? MetricsCollector.GaugeNames)
+              .mapTo[MetricsCollector.GaugeNames.Reply]
 
             complete(
               data.map(
                 _
                   .source
-                  .map(entry => ServerSentEvent(entry.toJson.compactPrint, "GaugeEntry"))
+                  .map {
+                    case nameAdded: GaugeNameAdded =>
+                      ServerSentEvent(nameAdded.toJson.compactPrint, "GaugeNameAdded")
+                    case nameRemoved: GaugeNameRemoved =>
+                      ServerSentEvent(nameRemoved.toJson.compactPrint, "GaugeNameRemoved")
+                  }
                   .keepAlive(1.second, () => ServerSentEvent.heartbeat)
               )
             )

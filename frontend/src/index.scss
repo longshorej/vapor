@@ -4,6 +4,10 @@ $web-font-path: 'data:text/css;base64,';
 @import "~bootstrap/scss/bootstrap";
 @import "~bootswatch/dist/cyborg/bootswatch";
 
+#content {
+  margin-top: 1rem;
+}
+
 #header {
     padding: 1rem;
     margin-bottom: 2rem;
@@ -18,4 +22,50 @@ $web-font-path: 'data:text/css;base64,';
 
 #settings {
   text-align: right;
+}
+
+#navigation {
+  margin-top: 0.75rem;
+}
+
+.no-data {
+  margin-top: 1rem;
+}
+
+#navigation .dropdown-toggle::after {
+  position: absolute;
+  right: 1rem;
+  top: 0.75rem;
+}
+
+#navigation .gauge-names {
+  width: 95%;
+  margin: 0.5rem 0;
+  margin-left: 5%;
+}
+
+#navigation .gauge-names .list-group-item.active:hover {
+  background-color: $primary;
+}
+
+#navigation .section-picker {
+  margin: 0.25rem 0;
+}
+
+
+.gauge-name-picker {
+  a:focus {
+    outline: 0;
+  }
+}
+
+.period-picker {
+  a:focus {
+    box-shadow: none;
+  }
+}
+
+
+.recharts-legend-item-text {
+  color: #FFFFFF;
 }
