@@ -628,7 +628,7 @@ class UserInterface private (metricsCollector: ActorRef, host: String, port: Int
                   data.map(
                     _
                       .source
-                      .filter(_.name == name)
+                      .filter(_.name.startsWith(name))
                       .map(gaugeEntry => ServerSentEvent(gaugeEntry.toJson.compactPrint, "GaugeEntry"))
                       .keepAlive(10.seconds, () => ServerSentEvent.heartbeat)
                   )

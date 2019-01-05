@@ -82,6 +82,8 @@ export default class extends React.Component {
     this.namesEventSource = null;
 
     this._isMounted = false;
+    this.animationInterval = 1000 / 10;
+    this.animationUpdated = 0;
 
     this.handleClean = this.handleClean.bind(this);
     this.handleGaugeEntry = this.handleGaugeEntry.bind(this);
@@ -237,6 +239,18 @@ export default class extends React.Component {
   }
 
   handleTick() {
+    const time = new Date().getTime();
+
+    if (this._isMounted) {
+      window.requestAnimationFrame(this.handleTick);
+    }
+
+    if (time - this.animationUpdated < this.animationInterval) {
+      return;
+    }
+
+    this.animationUpdated = time;
+
     this.setState(state => {
       if (this.state.period === 'live') {
         state.timestamp = new Date().getTime();
@@ -287,9 +301,6 @@ export default class extends React.Component {
 
       return state;
     }, () => {
-      if (this._isMounted) {
-        window.requestAnimationFrame(this.handleTick);
-      }
     });
   }
 
